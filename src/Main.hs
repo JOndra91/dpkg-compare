@@ -6,11 +6,14 @@ module Main where
 
 import Control.Monad
 import Data.Char
+import Data.List
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Map.Merge.Strict as Map
+import Data.Maybe
 import Data.Monoid
 import qualified Data.Set as Set
+import Data.Tuple
 import System.Console.GetOpt
 import System.Environment
 import System.Exit
@@ -84,15 +87,27 @@ main = getArgs >>= \args -> case getOpt Permute argsDef args of
         _ -> error "Invalid arguments."
 
 usage :: String
-usage = usageInfo str argsDef
+usage = usageInfo pre argsDef <> post
   where
-    str = unlines
+    pre = unlines
         [ "Utility for comparing output of 'dpkg --list' command."
         , ""
         , "Usage:"
         , "dpkg-compare {[-r|--reference] REFERENCE_FILE} {[-o|--other] OTHER_FILE}"
         , "             [--only-extra|--only-missing|--only-mismatch] [--only-installed]"
         , "dpkg-compare {-h|--help}"
+        ]
+
+    post = unlines
+        [ "Output format:"
+        , "<diff> <name> <version> <architecture> <status>"
+        , ""
+        , "  diff:"
+        , "    o : package is same in both files"
+        , "    + : package is only in REFERENCE_FILE"
+        , "    - : package is only in OTHER_FILE"
+        , ""
+        , "For alignment of output into columns, pipe output into 'column -t' command."
         ]
 
 argsDef :: [OptDescr (ProgOpts -> ProgOpts)]
@@ -122,7 +137,7 @@ argsDef =
 
 doStuff :: ProgOpts -> IO ()
 doStuff ProgOpts{..}
-  | optHelp = putStrLn usage
+  | optHelp = putStr usage
   | otherwise = do
     when (null optReferenceFile) $ die "REFERENCE_FILE not specified."
     when (null optOtherFile) $ die "OTHER_FILE not specified."
@@ -133,7 +148,7 @@ doStuff ProgOpts{..}
           (Map.mapMissing $ (Missing .) . (flip const))
           (Map.zipWithMatched matchVersion)
           referenceMap otherMap
-    putStrLn . unlines . fmap show . pkgFilter $ Map.elems diff
+    putStrLn . unlines . concat . fmap showDiff . pkgFilter $ Map.elems diff
   where
     loadFile = fmap (mkPkgMap . pkgStatus . parseFile) . readFile
 
@@ -188,22 +203,47 @@ pkgParser = do
     pkgArch <- mkArch <$> munch1 (not . isSpace)
     pure Package{..}
   where
-    mkStatus = \case
-        'n' -> None
-        'i' -> Installed
-        'c' -> Configured
-        'u' -> Unpacked
-        'f' -> HalfConfigured
-        'h' -> HalfInstalled
-        'w' -> TriggerAwaiting
-        't' -> TriggerPending
-        s -> error $ "Unexpected status: " <> [s]
+    mkStatus s = fromMaybe err (lookup s statusMap)
+      where
+        err = error $ "Unknown status: " <> [s]
 
-    mkArch = \case
-        "amd64" -> Arch64
-        "i386" -> Arch32
-        "all" -> ArchAll
-        a -> error $ "Unexpected architecture: " <> a
+    mkArch a = fromMaybe err (lookup a archMap)
+      where
+        err = error $ "Unknown architecture: " <> a
+
+archMap :: [(String, Architecture)]
+archMap =
+    [ ("amd64",Arch64)
+    , ("i386",Arch32)
+    , ("all",ArchAll)
+    ]
+
+statusMap :: [(Char, Status)]
+statusMap =
+    [ ('n', None)
+    , ('i', Installed)
+    , ('c', Configured)
+    , ('u', Unpacked)
+    , ('f', HalfConfigured)
+    , ('h', HalfInstalled)
+    , ('w', TriggerAwaiting)
+    , ('t', TriggerPending)
+    ]
 
 mkPkgMap :: [Package] -> Map String Package
 mkPkgMap = foldl (\m pkg@Package{..} -> Map.insert pkgName pkg m) Map.empty
+
+showPkg :: Package -> String
+showPkg Package{..} = intercalate " " [pkgName, pkgVersion, arch, [status]]
+  where
+    arch = fromJust $ rLookup pkgArch archMap
+    status = fromJust $ rLookup pkgStatus statusMap
+
+    rLookup needle haystack = lookup needle $ fmap swap haystack
+
+showDiff :: Difference -> [String]
+showDiff = \case
+    Extra p -> ["+ " <> showPkg p]
+    Missing p -> ["- " <> showPkg p]
+    Mismatch p q -> ["- " <> showPkg p, "+ " <> showPkg q]
+    Same p -> ["o " <> showPkg p]

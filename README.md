@@ -1,6 +1,7 @@
 # dpkg-compare
 
 Utility for comparing output of 'dpkg --list' command.
+For alignment of output into columns, pipe output into 'column -t' command.
 
 ## Usage
 
